@@ -1,0 +1,35 @@
+body { width: 350px; font-family: 'Inter', sans-serif; margin: 0; background-color: #f8f9fa; }
+.header { background: #0f172a; color: white; padding: 15px; text-align: center; }
+.header h2 { margin: 0; font-size: 18px; }
+.container { padding: 15px; display: flex; flex-direction: column; gap: 15px; }
+
+.claim-section { background: white; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; }
+.claim-section label { font-size: 10px; color: #64748b; font-weight: bold; letter-spacing: 1px; }
+#claim-text { font-size: 13px; color: #334155; margin-top: 5px; font-style: italic; max-height: 60px; overflow-y: auto; }
+#claim-input { width: 100%; box-sizing: border-box; margin-top: 5px; padding: 8px; font-size: 13px; font-family: inherit; border: 1px solid #e2e8f0; border-radius: 6px; resize: vertical; min-height: 60px; }
+#claim-input:focus { outline: none; border-color: #2563eb; }
+#claim-input::placeholder { color: #94a3b8; }
+
+button { background: #2563eb; color: white; border: none; padding: 12px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; width: 100%; }
+button:hover { background: #1d4ed8; }
+button:disabled { background: #94a3b8; cursor: not-allowed; }
+
+.hidden { display: none; }
+
+/* Verdict Badges */
+#verdict-box { text-align: center; font-size: 20px; font-weight: 800; padding: 10px; border-radius: 8px; color: white; letter-spacing: 2px; }
+.v-true { background: #10b981; } /* Green */
+.v-false { background: #ef4444; } /* Red */
+.v-misleading { background: #f59e0b; } /* Orange */
+.v-unverified { background: #64748b; } /* Grey */
+
+.reasoning-box p { font-size: 13px; line-height: 1.4; color: #334155; }
+.sources-box ul { padding-left: 20px; font-size: 12px; }
+.sources-box li { margin-bottom: 5px; }
+.sources-box a { color: #2563eb; text-decoration: none; }
+.sources-box a:hover { text-decoration: underline; }
+
+/* Spinner */
+.spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 0 auto; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+#loader p { text-align: center; font-size: 12px; color: #64748b; margin-top: 10px; }

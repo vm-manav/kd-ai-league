@@ -1,0 +1,26 @@
+{
+    "manifest_version": 3,
+    "name": "TruthGuard - AI Fact Checker",
+    "version": "1.0",
+    "description": "Instantly verify news and claims using Agentic RAG.",
+    "permissions": ["contextMenus", "activeTab", "scripting"],
+    "host_permissions": ["http://localhost:8000/*"],
+    "background": {
+      "service_worker": "background.js"
+    },
+    "action": {
+      "default_popup": "popup.html",
+      "default_icon": {
+        "128": "icon.png"
+      }
+    },
+    "icons": {
+      "128": "icon.png"
+    },
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["content.js"]
+      }
+    ]
+  }

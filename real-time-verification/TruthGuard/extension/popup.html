@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TruthGuard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="header">
+        <h2>🛡️ TruthGuard AI</h2>
+    </div>
+
+    <div class="container">
+        <div class="claim-section">
+            <label>SELECTED CLAIM:</label>
+            <p id="claim-text">No text selected on page.</p>
+        </div>
+
+        <div class="claim-section">
+            <label>OR TYPE / PASTE CLAIM:</label>
+            <textarea id="claim-input" rows="4" placeholder="Enter a claim or statement to verify..."></textarea>
+        </div>
+
+        <button id="verify-btn" disabled>VERIFY CLAIM</button>
+
+        <div id="loader" class="hidden">
+            <div class="spinner"></div>
+            <p>Scanning Knowledge Base & Web...</p>
+        </div>
+
+        <div id="result-area" class="hidden">
+            <div id="verdict-box">UNKNOWN</div>
+            
+            <div class="reasoning-box">
+                <strong>Analysis:</strong>
+                <p id="reasoning-text"></p>
+            </div>
+
+            <div class="sources-box">
+                <strong>Sources:</strong>
+                <ul id="sources-list"></ul>
+            </div>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>
