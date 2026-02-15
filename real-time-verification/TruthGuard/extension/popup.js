@@ -7,7 +7,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateVerifyButton() {
         const typed = (claimInput.value || '').trim();
-        verifyBtn.disabled = typed.length === 0;
+        const selected = (claimTextElem.innerText || '').trim();
+        const hasSelection = selected.length > 0 && selected !== 'No text selected on page.';
+        verifyBtn.disabled = typed.length === 0 && !hasSelection;
     }
 
     // 1. Get Selected Text from Browser (show in "selected" area; optional pre-fill)
@@ -85,19 +87,23 @@ function displayResult(data) {
     if (v.includes('true')) verdictBox.classList.add('v-true');
     else if (v.includes('false')) verdictBox.classList.add('v-false');
     else if (v.includes('misleading')) verdictBox.classList.add('v-misleading');
+    else if (v.includes('not a factual') || v.includes('not factual')) verdictBox.classList.add('v-not-factual');
     else verdictBox.classList.add('v-unverified');
 
     // Set Text
-    reasoningText.innerText = data.reasoning;
+    reasoningText.innerText = data.reasoning || '';
 
-    // Set Sources
+    // Set Sources (guard against missing array)
     sourcesList.innerHTML = '';
-    data.sources.forEach(src => {
+    (data.sources || []).forEach(src => {
         const li = document.createElement('li');
         const a = document.createElement('a');
-        a.href = src.url;
+        a.href = src.url || '#';
         a.target = '_blank';
-        a.innerText = src.title;
+        a.rel = 'noopener noreferrer';
+        const span = document.createElement('span');
+        span.textContent = src.title || 'Source';
+        a.appendChild(span);
         li.appendChild(a);
         sourcesList.appendChild(li);
     });
