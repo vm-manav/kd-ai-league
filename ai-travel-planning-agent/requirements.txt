@@ -1,0 +1,10 @@
+streamlit
+langchain
+langchain-community
+langchain-openai
+langgraph
+google-search-results
+tavily-python
+folium
+streamlit-folium
+pydantic
