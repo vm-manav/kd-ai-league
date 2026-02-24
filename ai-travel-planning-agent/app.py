@@ -1,5 +1,6 @@
 import streamlit as st
 import folium
+import uuid
 from streamlit_folium import st_folium
 from agent import run_travel_agent
 
@@ -9,12 +10,20 @@ st.title("🌍 Autonomous Travel Swarm")
 st.markdown("Powered by LangGraph Parallel Agents (Booking, Weather, Local Expert)")
 
 # Initialize session state
-if 'thread_id' not in st.session_state:
-    st.session_state.thread_id = "user_123"
-if 'trip_data' not in st.session_state:
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
+if "trip_data" not in st.session_state:
     st.session_state.trip_data = None
-if 'chat_history' not in st.session_state:
+if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+# New trip = fresh thread so previous destination (e.g. Goa) is not reused for Jaipur
+with st.sidebar:
+    if st.button("🆕 Start new trip", use_container_width=True):
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.trip_data = None
+        st.session_state.chat_history = []
+        st.rerun()
 
 # Chat Interface
 for msg in st.session_state.chat_history:
@@ -37,24 +46,31 @@ if user_input:
             st.session_state.chat_history.append({"role": "assistant", "content": msg})
             with st.chat_message("assistant"):
                 st.markdown(msg)
-            result["missing_info_question"] = "" 
+            result["missing_info_question"] = ""
             st.stop()
 
     if result.get("final_itinerary"):
-        st.session_state.chat_history.append({"role": "assistant", "content": "Trip finalized! See details below."})
-        with st.chat_message("assistant"):
-            st.markdown("Trip finalized! Review your package below.")
+        if result.get("validation_issues"):
+            st.session_state.chat_history.append({"role": "assistant", "content": "Trip draft ready but some issues were found. See validation below."})
+            with st.chat_message("assistant"):
+                st.markdown("Trip draft ready but some issues were found. See validation below.")
+        else:
+            st.session_state.chat_history.append({"role": "assistant", "content": "Trip finalized! See details below."})
+            with st.chat_message("assistant"):
+                st.markdown("Trip finalized! Review your package below.")
 
 # Render Dashboard
 if st.session_state.trip_data and st.session_state.trip_data.get("final_itinerary"):
     data = st.session_state.trip_data
-    
+
     st.divider()
-    
-    if "WARNING" in data.get('weather_alert', ''):
-        st.error(data['weather_alert'])
+
+    if data.get("validation_issues"):
+        st.warning("**Validation issues:** " + data["validation_issues"])
+    if "WARNING" in data.get("weather_alert", "") or (data.get("weather_output") or {}).get("severity") == "severe":
+        st.error(data.get("weather_alert", "Weather alert"))
     else:
-        st.success(data.get('weather_alert', 'Weather checked successfully.'))
+        st.success(data.get("weather_alert", "Weather checked successfully."))
 
     col1, col2 = st.columns([2, 1.5])
     
