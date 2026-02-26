@@ -14,10 +14,33 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from streamlit_folium import st_folium
 from agent import run_travel_agent, reset_thread
 
-st.set_page_config(page_title="Swarm Travel Planner", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Autonomous Travel Planner", layout="wide", page_icon="🌍")
 
-st.title("🌍 Autonomous Travel Swarm")
+st.title("🌍 Autonomous Travel Planner")
 st.markdown("Powered by LangGraph Parallel Agents (Planning, Booking, Weather, Local Expert)")
+st.markdown(
+    """
+<style>
+/* Keep markdown tables contained inside Streamlit columns during variant compare. */
+[data-testid="stMarkdownContainer"] table {
+  width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+[data-testid="stMarkdownContainer"] th,
+[data-testid="stMarkdownContainer"] td {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 # Initialize session state
 if "chats" not in st.session_state:

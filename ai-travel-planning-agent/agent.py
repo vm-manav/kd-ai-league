@@ -132,6 +132,7 @@ class TravelState(TypedDict, total=False):
     replan_required: bool
     prev_snapshot: dict
     current_snapshot: dict
+    confirmed_fields: List[str]
     last_log_id: int
 
 # Simple caches to reduce repeated tool calls
@@ -168,7 +169,10 @@ def _missing_fields_message(missing: List[str]) -> str:
         "budget": "budget in INR",
         "destination": "destination",
     }
-    items = [friendly.get(m, m) for m in missing]
+    # Ask only for remaining core fields.
+    core = ["budget", "start_date", "end_date", "travelers", "origin_city"]
+    remaining = [m for m in core if m in missing]
+    items = [friendly.get(m, m) for m in remaining]
     return "To proceed, please share: " + ", ".join(items) + "."
 
 # --- AGENT NODES ---
@@ -207,16 +211,140 @@ def intent_analyzer(state: TravelState):
         context += f"\n\n(Previous context for budget only if not in latest message: {state.get('summary')})"
     intent = structured_llm.invoke(context)
 
-    # Fill missing fields from previous state if not in latest message
-    effective_origin = intent.origin_city or state.get("origin_city")
-    effective_dest = intent.destination or state.get("destination")
-    effective_start = intent.start_date or state.get("start_date")
-    effective_end = intent.end_date or state.get("end_date")
-    effective_travelers = intent.travelers if intent.travelers is not None else state.get("travelers")
-    effective_budget = intent.budget if intent.budget is not None else state.get("budget")
-    effective_style = intent.travel_style or state.get("travel_style")
-    effective_prefs = intent.preferences or state.get("preferences", [])
-    effective_must_do = intent.must_do or state.get("must_do", [])
+    latest_l = latest.lower()
+
+    def _has_value(v) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return bool(v.strip())
+        if isinstance(v, list):
+            return len(v) > 0
+        return True
+
+    def _pick_value(parsed_value, prev_value, continuation_mode):
+        if _has_value(parsed_value):
+            return parsed_value
+        return prev_value if continuation_mode else None
+
+    def _extract_labeled_dates(txt: str) -> tuple[Optional[str], Optional[str]]:
+        """Deterministic fallback for patterns like:
+        'start date - 4th march, end date - 10th march'
+        """
+        txt_norm = " ".join((txt or "").strip().split())
+        start_match = re.search(
+            r"start\s*date\s*[:=-]?\s*(.+?)(?=,\s*end\s*date|\s+and\s+end\s*date|$)",
+            txt_norm,
+            re.I,
+        )
+        end_match = re.search(
+            r"end\s*date\s*[:=-]?\s*(.+?)(?=,\s*start\s*date|\s+and\s+start\s*date|$)",
+            txt_norm,
+            re.I,
+        )
+        start_val = start_match.group(1).strip(" ,.-") if start_match else None
+        end_val = end_match.group(1).strip(" ,.-") if end_match else None
+        return start_val, end_val
+
+    def _extract_travelers(txt: str) -> Optional[int]:
+        m = re.search(
+            r"(?:\b(\d+)\s*(?:people|travellers|travelers|pax|persons|guests)\b|\b(?:people|travellers|travelers|pax|persons|guests)\s*[:=-]?\s*(\d+)\b|\bparty of\s+(\d+)\b)",
+            txt or "",
+            re.I,
+        )
+        if not m:
+            return None
+        for g in m.groups():
+            if g and g.isdigit():
+                return int(g)
+        return None
+
+    def _extract_budget_inr(txt: str) -> Optional[int]:
+        t = (txt or "").lower()
+        m_lakh = re.search(r"(\d+(?:\.\d+)?)\s*(lakh|lac)\b", t, re.I)
+        if m_lakh:
+            return int(float(m_lakh.group(1)) * 100000)
+        m_k = re.search(r"(\d+(?:\.\d+)?)\s*k\b", t, re.I)
+        if m_k:
+            return int(float(m_k.group(1)) * 1000)
+        m_num = re.search(r"(?:budget|inr|₹|rs\.?|rupees)\s*[:=-]?\s*(\d[\d,]*)", t, re.I)
+        if m_num:
+            return int(m_num.group(1).replace(",", ""))
+        return None
+
+    def _extract_origin_city(txt: str) -> Optional[str]:
+        m = re.search(
+            r"(?:origin\s*city|from|depart\s*from)\s*[:=-]?\s*([a-zA-Z][a-zA-Z\s.-]{1,40})",
+            txt or "",
+            re.I,
+        )
+        if not m:
+            return None
+        city = m.group(1).strip(" ,.-")
+        # Keep only leading words until obvious separators
+        city = re.split(r"\b(?:and|with|for|start|end|budget|people|travelers|travellers)\b", city, maxsplit=1, flags=re.I)[0].strip(" ,.-")
+        return city or None
+
+    def _has_budget(txt: str) -> bool:
+        return bool(re.search(r"(budget|inr|₹|rs\.?|rupees|\b\d{2,}\s*k\b|\b\d+(?:\.\d+)?\s*lakh\b)", txt, re.I))
+    def _has_dates(txt: str) -> bool:
+        return bool(re.search(r"(\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?[/-]\d{1,2}(?:[/-]\d{2,4})?\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)", txt, re.I))
+    def _has_travelers(txt: str) -> bool:
+        return bool(re.search(r"(\b\d+\s*(people|travellers|travelers|pax|persons|guests)\b|\b(?:people|travellers|travelers|pax|persons|guests)\s*[:=-]?\s*\d+\b|\bparty of\s+\d+\b)", txt, re.I))
+    def _has_origin(txt: str) -> bool:
+        return bool(re.search(r"(from\s+\w+|origin\s+city|depart\s+from)", txt, re.I))
+    def _has_destination(txt: str, dest: Optional[str]) -> bool:
+        if not dest:
+            return bool(re.search(r"(trip\s+to|visit|travel\s+to|plan\s+a\s+trip\s+to)", txt, re.I))
+        return dest.lower() in txt
+
+    fallback_start, fallback_end = _extract_labeled_dates(latest)
+    fallback_travelers = _extract_travelers(latest)
+    fallback_budget = _extract_budget_inr(latest)
+    fallback_origin = _extract_origin_city(latest)
+
+    explicit_budget = _has_budget(latest)
+    explicit_dates = _has_dates(latest) or bool(fallback_start or fallback_end)
+    explicit_travelers = _has_travelers(latest)
+    explicit_origin = _has_origin(latest)
+    explicit_destination = _has_destination(latest, intent.destination)
+
+    confirmed_fields = []
+    if explicit_budget:
+        confirmed_fields.append("budget")
+    if explicit_dates:
+        confirmed_fields.extend(["start_date", "end_date"])
+    if explicit_travelers:
+        confirmed_fields.append("travelers")
+    if explicit_origin:
+        confirmed_fields.append("origin_city")
+    if explicit_destination:
+        confirmed_fields.append("destination")
+
+    # Fill missing fields from previous state if not in latest message (continuation)
+    if explicit_destination:
+        effective_dest = intent.destination or state.get("destination")
+    elif state.get("destination"):
+        effective_dest = state.get("destination")
+    else:
+        effective_dest = intent.destination
+    continuation = bool(state.get("destination")) and not explicit_destination
+
+    parsed_origin = intent.origin_city or fallback_origin
+    parsed_start = intent.start_date or fallback_start
+    parsed_end = intent.end_date or fallback_end
+    parsed_travelers = intent.travelers if intent.travelers is not None else fallback_travelers
+    parsed_budget = intent.budget if intent.budget is not None else fallback_budget
+
+    effective_origin = _pick_value(parsed_origin, state.get("origin_city"), continuation)
+    effective_start = _pick_value(parsed_start, state.get("start_date"), continuation)
+    effective_end = _pick_value(parsed_end, state.get("end_date"), continuation)
+    effective_travelers = _pick_value(parsed_travelers, state.get("travelers"), continuation)
+    effective_budget = _pick_value(parsed_budget, state.get("budget"), continuation)
+
+    effective_style = _pick_value(intent.travel_style, state.get("travel_style"), continuation)
+    effective_prefs = _pick_value(intent.preferences, state.get("preferences", []), continuation) or []
+    effective_must_do = _pick_value(intent.must_do, state.get("must_do", []), continuation) or []
 
     def _norm(s):
         return (s or "").strip().lower()
@@ -318,6 +446,7 @@ def intent_analyzer(state: TravelState):
         "missing_info_question": question,
         "changed_fields": changed_fields,
         "replan_required": replan_required,
+        "confirmed_fields": confirmed_fields,
         "prev_snapshot": prev_snapshot,
         "current_snapshot": current_snapshot,
         "task_status": {"intent": "done"},
@@ -669,10 +798,12 @@ def weather_guardrail_router(state: TravelState):
 
 # --- GRAPH ROUTING ---
 def router(state: TravelState):
-    if state.get("replan_required"):
-        return "create_plan"
+    # Route on effective state completeness (not just what was explicitly mentioned
+    # in the latest user turn) so multi-turn incremental input works.
     if state.get("missing_fields"):
         return "ask_human"
+    if state.get("replan_required"):
+        return "create_plan"
     if state.get("plan_approved"):
         return ["fetch_bookings", "fetch_tips", "check_weather"]
     return "create_plan"
