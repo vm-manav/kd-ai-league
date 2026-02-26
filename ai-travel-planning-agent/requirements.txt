@@ -8,3 +8,5 @@ tavily-python
 folium
 streamlit-folium
 pydantic
+fpdf2
+reportlab
