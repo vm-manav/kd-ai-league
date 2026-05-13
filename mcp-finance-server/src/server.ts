@@ -14,7 +14,27 @@ interface SessionState {
 }
 
 const sessions: Record<string, SessionState> = {};
-const app = createMcpExpressApp();
+const app = createMcpExpressApp({ host: "0.0.0.0" });
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "authorization,content-type,accept,mcp-session-id,mcp-protocol-version",
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "mcp-session-id,x-ratelimit-limit,x-ratelimit-remaining,retry-after,www-authenticate",
+  );
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+});
 
 app.get("/health", (_req, res) => {
   res.status(200).json({

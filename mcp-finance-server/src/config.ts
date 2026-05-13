@@ -16,6 +16,8 @@ export const config = {
     issuer: process.env.OAUTH_ISSUER ?? "",
     jwksUri: process.env.OAUTH_JWKS_URI ?? "",
     audience: process.env.OAUTH_AUDIENCE ?? "mcp-finance-server",
+    tierClaim: process.env.OAUTH_TIER_CLAIM ?? "https://kd-ai-league.example.com/tier",
+    rolesClaim: process.env.OAUTH_ROLES_CLAIM ?? "https://kd-ai-league.example.com/roles",
     authorizationServer:
       process.env.OAUTH_AUTHORIZATION_SERVER ??
       "http://localhost:8081/realms/mcp-finance",

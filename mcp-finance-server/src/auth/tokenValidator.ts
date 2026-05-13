@@ -9,14 +9,14 @@ const jwks =
     : null;
 
 function parseScopes(payload: JWTPayload): Set<Scope> {
-  const scopeString =
-    typeof payload.scope === "string"
-      ? payload.scope
-      : Array.isArray(payload.scp)
-        ? payload.scp.join(" ")
-        : "";
-
-  const raw = scopeString.split(/\s+/).filter(Boolean);
+  const scopeString = typeof payload.scope === "string" ? payload.scope : "";
+  const scp = Array.isArray(payload.scp) ? payload.scp : [];
+  const permissions = Array.isArray(payload.permissions) ? payload.permissions : [];
+  const raw = [
+    ...scopeString.split(/\s+/),
+    ...scp,
+    ...permissions,
+  ].filter((item): item is string => typeof item === "string" && item.length > 0);
   const supported = new Set<Scope>([
     "market:read",
     "fundamentals:read",
@@ -46,15 +46,6 @@ function parseScopes(payload: JWTPayload): Set<Scope> {
 export async function validateBearerToken(
   authorizationHeader?: string,
 ): Promise<AuthContext | null> {
-  if (!authorizationHeader?.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authorizationHeader.slice("Bearer ".length).trim();
-  if (!token) {
-    return null;
-  }
-
   if (config.authBypass) {
     return {
       userId: "dev-user",
@@ -75,6 +66,15 @@ export async function validateBearerToken(
       ]),
       tokenAudience: config.oauth.audience,
     };
+  }
+
+  if (!authorizationHeader?.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authorizationHeader.slice("Bearer ".length).trim();
+  if (!token) {
+    return null;
   }
 
   if (!jwks || !config.oauth.issuer) {

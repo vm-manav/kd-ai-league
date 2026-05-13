@@ -108,8 +108,36 @@ For judged demo, set:
 - `OAUTH_ISSUER`
 - `OAUTH_JWKS_URI`
 - `OAUTH_AUDIENCE`
+- `OAUTH_TIER_CLAIM`
 
 And use real OAuth login with PKCE from your MCP client setup.
+
+### Auth0 production tier setup
+
+For Auth0, create an API with identifier `mcp-finance-server`, enable RBAC, and enable
+"Add Permissions in the Access Token". Assign API permissions to roles such as:
+
+- `finance-free`: `market:read`, `news:read`
+- `finance-premium`: free permissions plus `fundamentals:read`, `technicals:read`, `mf:read`, `macro:read`
+- `finance-analyst`: premium permissions plus `macro:historical`, `filings:read`, `filings:deep`, `research:generate`, `watchlist:read`, `watchlist:write`
+
+Add an Auth0 Post Login Action that writes the user's tier to a namespaced access-token claim:
+
+```js
+exports.onExecutePostLogin = async (event, api) => {
+  const namespace = "https://kd-ai-league.example.com";
+  const roles = event.authorization?.roles || [];
+
+  let tier = "free";
+  if (roles.includes("finance-analyst")) tier = "analyst";
+  else if (roles.includes("finance-premium")) tier = "premium";
+
+  api.accessToken.setCustomClaim(`${namespace}/tier`, tier);
+  api.accessToken.setCustomClaim(`${namespace}/roles`, roles);
+};
+```
+
+Set `OAUTH_TIER_CLAIM` and `OAUTH_ROLES_CLAIM` to match those namespaced claims. The server reads scopes from `scope`, `scp`, or Auth0 RBAC `permissions`.
 
 ---
 
