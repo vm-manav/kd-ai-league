@@ -64,6 +64,7 @@ function registerTieredTool(input: {
       inputSchema,
     },
     async (args) => {
+      const startedAt = Date.now();
       if (!hasScopes(auth, requiredScopes)) {
         appendAudit({
           userId: auth.userId,
@@ -77,16 +78,18 @@ function registerTieredTool(input: {
       }
 
       try {
-        const data =
+        const result =
           cacheTtlSec && cacheTtlSec > 0
-            ? (
-                await withTtlCache(
-                  `${name}:${JSON.stringify(args)}`,
-                  cacheTtlSec,
-                  async () => handler(args as ToolHandlerArgs),
-                )
-              ).data
-            : await handler(args as ToolHandlerArgs);
+            ? await withTtlCache(
+                `${name}:${JSON.stringify(args)}`,
+                cacheTtlSec,
+                async () => handler(args as ToolHandlerArgs),
+              )
+            : {
+                data: await handler(args as ToolHandlerArgs),
+                stale: false,
+                cacheHit: false,
+              };
 
         appendAudit({
           userId: auth.userId,
@@ -94,10 +97,15 @@ function registerTieredTool(input: {
           operation: name,
           status: "success",
           timestamp: new Date().toISOString(),
+          details: {
+            cacheHit: result.cacheHit,
+            stale: result.stale,
+            durationMs: Date.now() - startedAt,
+          },
         });
 
         return {
-          content: [{ type: "text", text: JSON.stringify(data) }],
+          content: [{ type: "text", text: JSON.stringify(result.data) }],
         };
       } catch (error) {
         appendAudit({
@@ -106,7 +114,10 @@ function registerTieredTool(input: {
           operation: name,
           status: "error",
           timestamp: new Date().toISOString(),
-          details: { message: error instanceof Error ? error.message : "unknown" },
+          details: {
+            message: error instanceof Error ? error.message : "unknown",
+            durationMs: Date.now() - startedAt,
+          },
         });
         return toolError("Upstream data unavailable", "upstream_unavailable");
       }

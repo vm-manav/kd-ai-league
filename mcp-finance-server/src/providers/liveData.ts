@@ -27,18 +27,88 @@ function withNs(ticker: string): string {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      "user-agent": "mcp-finance-server/0.2",
-      accept: "application/json,text/plain,*/*",
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        "user-agent": "mcp-finance-server/0.2",
+        accept: "application/json,text/plain,*/*",
+        ...(init?.headers ?? {}),
+      },
+    });
+    if (res.ok) {
+      return (await res.json()) as T;
+    }
+    if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      continue;
+    }
     throw new Error(`HTTP ${res.status} from ${url}`);
   }
-  return (await res.json()) as T;
+
+  throw new Error(`Unable to fetch ${url}`);
+}
+
+interface YahooSession {
+  cookie: string;
+  crumb: string;
+  expiresAt: number;
+}
+
+let yahooSession: YahooSession | null = null;
+
+async function getYahooSession(): Promise<YahooSession> {
+  const now = Date.now();
+  if (yahooSession && yahooSession.expiresAt > now) {
+    return yahooSession;
+  }
+
+  const cookieRes = await fetch("https://fc.yahoo.com", {
+    redirect: "manual",
+    headers: { "user-agent": "Mozilla/5.0" },
+  });
+  const getSetCookie = (cookieRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookies =
+    typeof getSetCookie === "function"
+      ? getSetCookie.call(cookieRes.headers)
+      : cookieRes.headers.get("set-cookie")
+        ? [cookieRes.headers.get("set-cookie") as string]
+        : [];
+  const cookie = setCookies.map((value) => value.split(";")[0]).filter(Boolean).join("; ");
+  if (!cookie) {
+    throw new Error("Yahoo session cookie unavailable");
+  }
+
+  const crumbRes = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      cookie,
+    },
+  });
+  if (!crumbRes.ok) {
+    throw new Error(`HTTP ${crumbRes.status} from Yahoo crumb endpoint`);
+  }
+  const crumb = (await crumbRes.text()).trim();
+  if (!crumb || crumb.includes("<")) {
+    throw new Error("Yahoo crumb unavailable");
+  }
+
+  yahooSession = { cookie, crumb, expiresAt: now + 30 * 60 * 1000 };
+  return yahooSession;
+}
+
+async function fetchYahooJson<T>(url: string, needsCrumb = false): Promise<T> {
+  const session = needsCrumb ? await getYahooSession() : null;
+  const separator = url.includes("?") ? "&" : "?";
+  const finalUrl =
+    needsCrumb && session ? `${url}${separator}crumb=${encodeURIComponent(session.crumb)}` : url;
+
+  return fetchJson<T>(finalUrl, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      ...(session ? { cookie: session.cookie } : {}),
+    },
+  });
 }
 
 function toEpoch(date: string): number {
@@ -53,23 +123,54 @@ function percentChange(current: number, previous: number): number {
 }
 
 async function yahooQuoteRaw(ticker: string): Promise<Record<string, any>> {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(withNs(ticker))}`;
-  const data = await fetchJson<any>(url);
-  const row = data?.quoteResponse?.result?.[0];
-  if (!row) {
-    throw new Error("No Yahoo quote result");
+  const symbol = withNs(ticker);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    symbol,
+  )}?range=1d&interval=1m`;
+  const data = await fetchYahooJson<any>(url);
+  const result = data?.chart?.result?.[0];
+  const meta = result?.meta;
+  if (!meta) {
+    throw new Error("No Yahoo chart quote result");
   }
-  return row;
+  return {
+    symbol,
+    regularMarketPrice: meta.regularMarketPrice,
+    regularMarketChangePercent: percentChange(
+      Number(meta.regularMarketPrice),
+      Number(meta.chartPreviousClose),
+    ),
+    regularMarketVolume: result.indicators?.quote?.[0]?.volume?.at(-1) ?? meta.regularMarketVolume,
+    marketCap: meta.marketCap,
+    trailingPE: meta.trailingPE,
+    fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
+    fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
+    fullExchangeName: meta.fullExchangeName ?? meta.exchangeName,
+    previousClose: meta.chartPreviousClose,
+    currency: meta.currency,
+  };
 }
 
 async function yahooHistoryRaw(ticker: string, from: string, to: string): Promise<Record<string, any>> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     withNs(ticker),
   )}?period1=${toEpoch(from)}&period2=${toEpoch(to)}&interval=1d`;
-  const data = await fetchJson<any>(url);
+  const data = await fetchYahooJson<any>(url);
   const result = data?.chart?.result?.[0];
   if (!result) {
     throw new Error("No Yahoo chart result");
+  }
+  return result;
+}
+
+async function yahooQuoteSummaryRaw(ticker: string, modules: string[]): Promise<Record<string, any>> {
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
+    withNs(ticker),
+  )}?modules=${encodeURIComponent(modules.join(","))}`;
+  const data = await fetchYahooJson<any>(url, true);
+  const result = data?.quoteSummary?.result?.[0];
+  if (!result) {
+    throw new Error("No Yahoo quoteSummary result");
   }
   return result;
 }
@@ -147,17 +248,19 @@ export async function getIndexData(index: string): Promise<Record<string, unknow
   };
   const symbol = map[index.toUpperCase()] ?? "^NSEI";
   try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`;
-    const data = await fetchJson<any>(url);
-    const row = data?.quoteResponse?.result?.[0];
-    if (!row) {
-      throw new Error("No index row");
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+      symbol,
+    )}?range=1d&interval=1m`;
+    const data = await fetchYahooJson<any>(url);
+    const meta = data?.chart?.result?.[0]?.meta;
+    if (!meta) {
+      throw new Error("No index chart row");
     }
     return {
       index: index.toUpperCase(),
-      value: row.regularMarketPrice,
-      changePercent: row.regularMarketChangePercent,
-      previousClose: row.regularMarketPreviousClose,
+      value: meta.regularMarketPrice,
+      changePercent: percentChange(Number(meta.regularMarketPrice), Number(meta.chartPreviousClose)),
+      previousClose: meta.chartPreviousClose,
       components: ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK"],
       citations: [{ source: "Yahoo Finance", detail: `${symbol} index quote` }],
     };
@@ -244,14 +347,17 @@ export async function getTechnicalIndicators(ticker: string): Promise<Record<str
       const smaEntry = Object.values(sma["Technical Analysis: SMA"] ?? {})[0] as any;
       const rsiEntry = Object.values(rsi["Technical Analysis: RSI"] ?? {})[0] as any;
       const macdEntry = Object.values(macd["Technical Analysis: MACD"] ?? {})[0] as any;
+      if (!smaEntry?.SMA || !rsiEntry?.RSI || !macdEntry?.MACD) {
+        throw new Error("Incomplete Alpha Vantage technical payload");
+      }
       return {
         ticker: ticker.toUpperCase(),
-        sma20: Number(smaEntry?.SMA ?? null),
-        rsi14: Number(rsiEntry?.RSI ?? null),
+        sma20: Number(smaEntry.SMA),
+        rsi14: Number(rsiEntry.RSI),
         macd: {
-          value: Number(macdEntry?.MACD ?? null),
-          signal: Number(macdEntry?.MACD_Signal ?? null),
-          histogram: Number(macdEntry?.MACD_Hist ?? null),
+          value: Number(macdEntry.MACD),
+          signal: Number(macdEntry.MACD_Signal),
+          histogram: Number(macdEntry.MACD_Hist),
         },
         citations: [{ source: "Alpha Vantage", detail: `${ticker.toUpperCase()}.BSE technical indicators` }],
       };
@@ -297,12 +403,11 @@ export async function getTechnicalIndicators(ticker: string): Promise<Record<str
 
 export async function getFinancialStatements(ticker: string): Promise<Record<string, unknown>> {
   try {
-    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
-      withNs(ticker),
-    )}?modules=incomeStatementHistoryQuarterly,balanceSheetHistoryQuarterly,cashflowStatementHistoryQuarterly`;
-    const data = await fetchJson<any>(url);
-    const result = data?.quoteSummary?.result?.[0];
-    if (!result) throw new Error("No financial statement payload");
+    const result = await yahooQuoteSummaryRaw(ticker, [
+      "incomeStatementHistoryQuarterly",
+      "balanceSheetHistoryQuarterly",
+      "cashflowStatementHistoryQuarterly",
+    ]);
     return {
       ticker: ticker.toUpperCase(),
       incomeStatement: result.incomeStatementHistoryQuarterly?.incomeStatementHistory ?? [],
@@ -317,14 +422,18 @@ export async function getFinancialStatements(ticker: string): Promise<Record<str
 
 export async function getKeyRatios(ticker: string): Promise<Record<string, unknown>> {
   try {
-    const q = await yahooQuoteRaw(ticker);
+    const result = await yahooQuoteSummaryRaw(ticker, [
+      "summaryDetail",
+      "defaultKeyStatistics",
+      "financialData",
+    ]);
     return {
       ticker: ticker.toUpperCase(),
-      pe: q.trailingPE ?? null,
-      pb: q.priceToBook ?? null,
-      roe: q.returnOnEquity ?? null,
-      debtToEquity: q.debtToEquity ?? null,
-      dividendYield: q.trailingAnnualDividendYield ?? null,
+      pe: result.summaryDetail?.trailingPE?.raw ?? null,
+      pb: result.defaultKeyStatistics?.priceToBook?.raw ?? null,
+      roe: result.financialData?.returnOnEquity?.raw ?? null,
+      debtToEquity: result.financialData?.debtToEquity?.raw ?? null,
+      dividendYield: result.summaryDetail?.dividendYield?.raw ?? null,
       citations: [{ source: "Yahoo Finance", detail: `${withNs(ticker)} key ratios from quote endpoint` }],
     };
   } catch {
@@ -334,11 +443,8 @@ export async function getKeyRatios(ticker: string): Promise<Record<string, unkno
 
 export async function getShareholdingPattern(ticker: string): Promise<Record<string, unknown>> {
   try {
-    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
-      withNs(ticker),
-    )}?modules=majorHoldersBreakdown`;
-    const data = await fetchJson<any>(url);
-    const holders = data?.quoteSummary?.result?.[0]?.majorHoldersBreakdown;
+    const result = await yahooQuoteSummaryRaw(ticker, ["majorHoldersBreakdown"]);
+    const holders = result.majorHoldersBreakdown;
     if (!holders) throw new Error("No holder breakdown");
     return {
       ticker: ticker.toUpperCase(),
@@ -357,11 +463,7 @@ export async function getShareholdingPattern(ticker: string): Promise<Record<str
 
 export async function getQuarterlyResults(ticker: string): Promise<Record<string, unknown>> {
   try {
-    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
-      withNs(ticker),
-    )}?modules=earningsHistory,financialData`;
-    const data = await fetchJson<any>(url);
-    const result = data?.quoteSummary?.result?.[0];
+    const result = await yahooQuoteSummaryRaw(ticker, ["earningsHistory", "financialData"]);
     const history = result?.earningsHistory?.history ?? [];
     if (!history.length) throw new Error("No quarterly history");
     const latest = history[0];
@@ -525,6 +627,30 @@ export async function getCompanyNews(
     }
   }
 
+  if (config.providers.gnewsApiKey) {
+    try {
+      const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(
+        `${ticker} India stock`,
+      )}&lang=en&max=${pageSize}&page=${page}&apikey=${encodeURIComponent(config.providers.gnewsApiKey)}`;
+      const data = await fetchJson<any>(url);
+      return {
+        ticker: ticker.toUpperCase(),
+        page,
+        pageSize,
+        total: data.totalArticles ?? 0,
+        items: (data.articles ?? []).map((a: any) => ({
+          headline: a.title,
+          source: a.source?.name ?? "GNews",
+          publishedAt: a.publishedAt,
+          url: a.url,
+        })),
+        citations: [{ source: "GNews", detail: `${ticker.toUpperCase()} article search` }],
+      };
+    } catch {
+      // fall through
+    }
+  }
+
   return getMockNews(ticker, page, pageSize);
 }
 
@@ -574,13 +700,40 @@ export async function getMarketNews(page: number, pageSize: number): Promise<Rec
       // continue
     }
   }
+  if (config.providers.gnewsApiKey) {
+    try {
+      const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(
+        "Indian stock market OR NSE OR Sensex",
+      )}&lang=en&max=${pageSize}&page=${page}&apikey=${encodeURIComponent(config.providers.gnewsApiKey)}`;
+      const data = await fetchJson<any>(url);
+      return {
+        page,
+        pageSize,
+        total: data.totalArticles ?? 0,
+        items: (data.articles ?? []).map((a: any) => ({
+          headline: a.title,
+          source: a.source?.name ?? "GNews",
+          publishedAt: a.publishedAt,
+          url: a.url,
+        })),
+        citations: [{ source: "GNews", detail: "Indian market news search feed" }],
+      };
+    } catch {
+      // continue
+    }
+  }
   return getMockMarketNews(page, pageSize);
 }
 
 export async function getRbiRates(): Promise<Record<string, unknown>> {
   // RBI does not expose a stable unauthenticated JSON endpoint for all policy rates.
   // Keep an explicit fallback while still returning structured macro context.
-  return getMockMacroSnapshot();
+  return {
+    ...(await getMockMacroSnapshot()),
+    dataQuality: "curated_fallback",
+    live: false,
+    note: "RBI policy rates are served from a curated fallback until a stable RBI/DBIE integration is configured.",
+  };
 }
 
 export async function getInflationData(): Promise<Record<string, unknown>> {
@@ -612,6 +765,8 @@ export async function getCorporateFilings(ticker: string, page: number, pageSize
     ...base,
     page,
     pageSize,
+    dataQuality: "curated_fallback",
+    live: false,
     note: "BSE endpoint integration can be added per your selected filing API route/headers.",
   };
 }
