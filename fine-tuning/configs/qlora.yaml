@@ -1,0 +1,87 @@
+# ============================================================
+# QLoRA Training Config — Text-to-SQL (Kaggle T4/P100)
+# Model: Qwen/Qwen2.5-Coder-7B-Instruct
+# ============================================================
+
+model:
+  name: "Qwen/Qwen2.5-Coder-7B-Instruct"
+  fallback: "mistralai/Mistral-7B-Instruct-v0.3"
+  max_seq_length: 512
+  dtype: "float16"                  # float16 on T4/P100; bfloat16 on A100+
+
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"        # NF4 is best for QLoRA (Dettmers et al.)
+  bnb_4bit_use_double_quant: true   # Saves ~0.4 bits/param extra
+  bnb_4bit_compute_dtype: "float16"
+
+lora:
+  r: 64                             # Rank — higher = more capacity, more memory
+  lora_alpha: 128                   # Scale = alpha/r; 2x rank is a good default
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:                   # All linear layers in Qwen2.5/Mistral
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+training:
+  # --- Core ---
+  num_train_epochs: 1               # 1 epoch on full 78K fits ~10-11hrs on T4
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8    # Effective batch = 8; larger = more stable
+  learning_rate: 2.0e-4             # Standard QLoRA LR; sweep: 1e-4, 2e-4, 5e-4
+  lr_scheduler_type: "cosine"       # Cosine decay avoids sharp loss spikes
+  warmup_ratio: 0.05                # 5% warmup steps
+  weight_decay: 0.01
+
+  # --- Precision ---
+  fp16: true                        # Set false if using bfloat16
+  bf16: false
+
+  # --- Logging & Saving ---
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+
+  # --- Efficiency ---
+  dataloader_num_workers: 4
+  group_by_length: true             # Pack similar-length sequences; reduces padding
+  packing: false                    # SFTTrainer packing — enable if seq_len is short
+
+  # --- Output ---
+  output_dir: "../outputs/qlora_run"
+  report_to: "none"                 # Set "wandb" if you have W&B set up
+
+data:
+  train_source_1: "b-mc2/sql-create-context"
+  train_source_2: "gretelai/synthetic_text_to_sql"
+  gretel_max_samples: 15000         # Only challenging + moderate from gretel
+  val_split: 0.08
+  test_split: 0.05
+  random_seed: 42
+
+evaluation:
+  metrics:
+    - "exact_match"
+    - "execution_accuracy"
+  complexity_breakdown: true
+  error_taxonomy: true
+
+# ============================================================
+# Hyperparameter sweep grid (reference)
+# Run manually and pick best val_loss
+# ============================================================
+sweep:
+  learning_rate: [1.0e-4, 2.0e-4, 5.0e-4]
+  lora_r: [16, 32, 64]
+  lora_alpha: [32, 64, 128]         # Keep alpha = 2 * r
