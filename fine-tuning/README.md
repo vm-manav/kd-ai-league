@@ -1,102 +1,158 @@
 # Fine-Tuning — Text-to-SQL (AI League PS5)
 
 **Task:** Natural language question → executable SQL query  
-**Model:** `Qwen/Qwen2.5-Coder-7B-Instruct` + QLoRA (4-bit NF4)  
-**Platform:** Kaggle (T4 / P100 GPU, 16GB VRAM)  
+**Model:** `mlx-community/Qwen2.5-Coder-3B-Instruct-4bit` + LoRA  
+**Platform:** MacBook M4 Air, 24GB Unified Memory — Apple MLX (no CUDA)  
+**Submission notebook:** `notebooks/local_mac_mlx.ipynb`
 
 ---
 
-## Project structure
+## Mandatory Steps — Completion Map
+
+| # | Step | Notebook Section | Status |
+|---|------|-----------------|--------|
+| 1 | Dataset cleaning and build | §1 — cells 5–8 | ✅ |
+| 2 | Model choice and baseline benchmark | §2 — cells 10–12 | ✅ |
+| 3 | Training strategy | §3 — markdown cell | ✅ |
+| 4 | Hyperparameter justification | §4 — markdown + training cell | ✅ |
+| 5 | Pre vs post output comparison | §5 — cells 20–21 | ✅ |
+| 6 | Evaluation + loss curves | §6 — cells 23–26 | ✅ |
+| 7 | Production thinking | §7 — cells 28 | ✅ |
+| + | Bonus: Safety guardrails | Bonus — cell 30 | ✅ |
+
+---
+
+## Final Results
+
+| Metric | Base Model | Fine-tuned | Delta |
+|---|---|---|---|
+| **Exact Match (EM)** | 3.00% | **69.87%** | +66.87pp (23× improvement) |
+| **Exec Accuracy (EX)** | 88.66% | **94.08%** | +5.42pp |
+
+**Complexity breakdown (fine-tuned, 1,500 examples):**
+
+| Complexity | EM | EX | n |
+|---|---|---|---|
+| easy | 72.20% | 94.86% | 1,439 |
+| medium | 18.18% | 76.19% | 22 |
+| hard | 29.41% | 72.73% | 17 |
+| extra_hard | 0.00% | 68.42% | 22 |
+
+---
+
+## Project Structure
 
 ```
 fine-tuning/
-├── README.md                        ← you are here
-├── requirements.txt                 ← all pip dependencies
+├── README.md                         ← you are here
+├── REPORT.md                         ← full written report (all 7 steps + bonus)
+├── requirements.txt                  ← pip dependencies
 ├── configs/
-│   └── qlora.yaml                   ← full hyperparameter config with justifications
+│   └── qlora.yaml                    ← QLoRA hyperparameter config (Kaggle reference)
 ├── src/
-│   ├── data_pipeline.py             ← load / clean / format / split datasets
-│   ├── evaluate.py                  ← EM + execution accuracy + error taxonomy
-│   └── inference.py                 ← generate_sql(), batch_generate_sql(), FastAPI stub
-├── notebooks/
-│   └── kaggle_master.ipynb          ← THE submission notebook (all 7 mandatory steps)
-├── data/                            ← local cache (gitignored)
-└── outputs/                         ← model checkpoints, predictions, plots (gitignored)
+│   ├── data_pipeline.py              ← load / clean / format / split datasets
+│   ├── evaluate.py                   ← EM + execution accuracy + error taxonomy
+│   └── inference.py                  ← generate_sql(), batch_generate_sql(), FastAPI stub
+└── notebooks/
+    ├── local_mac_mlx.ipynb           ← PRIMARY submission notebook (all 7 steps, real outputs)
+    ├── kaggle_master.ipynb           ← Kaggle reference notebook (7B model, archived)
+    ├── mlx_data/
+    │   ├── train.jsonl               ← 2,000 training examples
+    │   ├── valid.jsonl               ← ~6,200 validation examples
+    │   └── test.jsonl                ← ~3,900 held-out test examples
+    └── mlx_output/
+        ├── best_adapter/             ← LoRA adapter at iter 200 (best val loss 0.763)
+        ├── adapters/                 ← all checkpoints
+        ├── serve.py                  ← FastAPI production stub
+        ├── loss_curves.png           ← train/val loss + zoomed convergence plot
+        ├── eda.png                   ← dataset complexity distribution
+        ├── evaluation_charts.png     ← Base vs FT bar chart + error taxonomy pie
+        ├── baseline_predictions.csv  ← base model predictions (100 examples)
+        └── pre_post_comparison.csv   ← side-by-side examples (8, all complexity levels)
 ```
 
 ---
 
-## Datasets
+## Dataset
 
-| Source | HuggingFace ID | Size used | Role |
-|--------|---------------|-----------|------|
-| sql-create-context | `b-mc2/sql-create-context` | ~74K (post-clean) | Primary — schema-aware backbone |
-| Gretel Synthetic | `gretelai/synthetic_text_to_sql` | 15K (challenging+moderate only) | Secondary — hard-query coverage |
+**Source:** `b-mc2/sql-create-context` (HuggingFace) — 78,577 NL→SQL pairs  
+Each row: `question` + `context` (CREATE TABLE DDL) + `answer` (gold SQL)
 
-**Why not Spider?** Spider's HuggingFace version doesn't include CREATE TABLE schemas inline. Execution accuracy requires in-memory SQLite, which needs the DDL — sql-create-context includes it directly.
+**Why this dataset:** Schema is embedded inline in every row — enables execution accuracy
+via in-memory SQLite without external database files.
+
+**Cleaning pipeline:**
+
+| Step | What removed | Why |
+|---|---|---|
+| Null/empty rows | Missing question, context, or SQL | Can't train on incomplete examples |
+| SQL parse validation | Unparseable strings (via sqlparse) | Wrong training signal |
+| Non-SELECT filter | INSERT/UPDATE/DELETE/DROP/DDL | Task is read-only |
+| Deduplication | Exact question duplicates (MD5) | Prevents train/test leakage |
+| Complexity labeling | — | Stratified split + per-bucket evaluation |
+
+**Split (stratified by complexity):**
+
+| Split | Size | Purpose |
+|---|---|---|
+| Train | 2,000 (sampled) | Fine-tuning |
+| Validation | ~6,200 | Early stopping |
+| Test (held-out) | ~3,900 | Final evaluation only |
 
 ---
 
-## Evaluation metrics
+## Model
 
-| Metric | What it measures |
-|--------|-----------------|
-| **Exact Match (EM)** | Normalized string equality after keyword casing + whitespace collapse |
-| **Execution Accuracy (EX)** | Run gold + predicted SQL against in-memory SQLite, compare result sets |
-| **Complexity Breakdown** | EM + EX per bucket: easy / medium / hard / extra_hard |
-| **Error Taxonomy** | Classify failures: syntax_error / wrong_table / wrong_column / wrong_aggregation / wrong_logic |
+**`mlx-community/Qwen2.5-Coder-3B-Instruct-4bit`**
 
-EM is strict but brittle. EX is the real measure — same result set = correct answer, even if written differently.
+| Criterion | Justification |
+|---|---|
+| Size (3B) | Fits in 5.1GB of 24GB unified memory. Trains in ~40 min vs 10+ hrs for 7B. |
+| Coder family | Pre-trained on SQL-heavy code corpus. Baseline EX already 88.66%. |
+| 4-bit MLX | Apple-native weights. No CUDA/bitsandbytes. Runs on Metal GPU. |
+| Apache 2.0 | Production-usable without restriction. |
 
 ---
 
-## How to run on Kaggle
+## Training
 
-### 1. Upload this repo as a Kaggle dataset or fork directly
+**Method:** Supervised Fine-Tuning with LoRA via `mlx_lm lora`
 
 ```bash
-# If using Kaggle CLI
-kaggle datasets create -p ./fine-tuning
+python -m mlx_lm lora \
+  --model mlx-community/Qwen2.5-Coder-3B-Instruct-4bit \
+  --train \
+  --data notebooks/mlx_data \
+  --num-layers 16 \
+  --batch-size 4 \
+  --iters 1500 \
+  --val-batches 25 \
+  --learning-rate 1e-4 \
+  --steps-per-report 10 \
+  --steps-per-eval 100 \
+  --save-every 100 \
+  --adapter-path notebooks/mlx_output/adapters \
+  --max-seq-length 512
 ```
 
-### 2. Open `notebooks/kaggle_master.ipynb` in Kaggle
-
-- Enable GPU accelerator (T4 × 2 or P100)
-- Run all cells top to bottom
-- Total training time: ~10–11 hrs on T4 (1 epoch, full dataset)
-- For a quick smoke test: set `MAX_TRAIN_SAMPLES = 2000` in the training cell
-
-### 3. What gets saved to `/kaggle/working/qlora_sql/`
-
-| File | Contents |
-|------|----------|
-| `final_adapter/` | LoRA adapter weights + tokenizer |
-| `baseline_predictions.csv` | Base model predictions on 200 test examples |
-| `test_predictions.csv` | Fine-tuned model predictions on full test set |
-| `pre_post_comparison.csv` | Side-by-side examples across all complexity levels |
-| `evaluation_charts.png` | Loss curves + complexity breakdown bar chart |
-| `training_history.json` | Full step-by-step loss log |
-| `serve.py` | FastAPI production serving stub |
-| `eda.png` | Dataset EDA plots |
+**Early stopped at iter 200** — val loss 0.763 (minimum). Rose to 0.832 at iter 300.
 
 ---
 
-## Hyperparameter decisions
+## Hyperparameters
 
 | Parameter | Value | Reasoning |
-|-----------|-------|-----------|
-| `lora_r` | 64 | Higher rank = more adapter capacity for schema-faithful SQL generation |
-| `lora_alpha` | 128 | Conventional 2×r scaling factor |
-| `learning_rate` | 2e-4 | Standard QLoRA LR (Dettmers et al.); sweep tried 1e-4/2e-4/5e-4 |
-| `epochs` | 1 | Full 74K dataset; 1 epoch ≈ 10h on T4. Val loss monitored for overfit |
-| `batch_size` | 1 + grad_accum 8 | Effective batch = 8; VRAM limit on T4 at seq_len=512 |
-| `max_seq_length` | 512 | 95th pct of prompts fit; longer sequences OOM on T4 |
-| `lr_scheduler` | cosine | Smooth decay; prevents late-training instability |
-| `warmup_ratio` | 0.05 | 5% steps for adapter weights to stabilise |
+|---|---|---|
+| `lora_rank` | 16 | 6.65M trainable params (0.216% of 3B) — sufficient for format alignment |
+| `num_layers` | 16 | Last 16 transformer layers — most task-specific representations |
+| `learning_rate` | 1e-4 | MLX LoRA standard (full-precision adapter weights, not quantized gradients) |
+| `iters` | 200 (early stopped) | Best val loss at iter 200; overfitting onset at iter 300 |
+| `batch_size` | 4 | Peak memory 5.1GB — leaves 19GB free on M4 Air |
+| `max_seq_length` | 512 | Covers 95th percentile of prompt+SQL lengths |
 
 ---
 
-## Prompt format
+## Prompt Format
 
 ```
 ### Task
@@ -104,52 +160,54 @@ Generate a SQL query to answer the following question.
 
 ### Database Schema
 CREATE TABLE employees (id INT, name TEXT, salary FLOAT, dept_id INT);
-CREATE TABLE departments (id INT, name TEXT);
 
 ### Question
-What is the average salary per department?
+What is the average salary?
 
 ### SQL
-SELECT d.name, AVG(e.salary) FROM employees e JOIN departments d ON e.dept_id = d.id GROUP BY d.name
+SELECT AVG(salary) FROM employees
 ```
 
-The loss is computed **only on the SQL tokens** (not the prompt prefix), so the model learns SQL generation exclusively.
+---
+
+## Evaluation Metrics
+
+| Metric | What it measures |
+|---|---|
+| **Exact Match (EM)** | Normalized string equality after keyword casing + whitespace collapse |
+| **Execution Accuracy (EX)** | Run gold + predicted SQL on in-memory SQLite, compare result sets |
+| **Complexity Breakdown** | EM + EX per bucket: easy / medium / hard / extra_hard |
+| **Error Taxonomy** | Classify failures: wrong_table / syntax_error / schema_skipped / wrong_column |
 
 ---
 
-## Mandatory steps map
+## Production Serving
 
-| # | Step | Where in notebook |
-|---|------|-------------------|
-| 1 | Dataset cleaning and build | §1 — cells 5–9 |
-| 2 | Model choice and baseline | §2 — cells 10–14 |
-| 3 | Training strategy | §3 — cell 15 |
-| 4 | Hyperparameter justification | §4 — cell 16 (markdown table + training args) |
-| 5 | Pre vs post comparison | §5 — cell 18 |
-| 6 | Evaluation + loss curves | §6 — cells 19–22 |
-| 7 | Production thinking | §7 — cells 23–24 |
-
----
-
-## Production deployment (Step 7 summary)
-
-The fine-tuned adapter (~200MB) is published to HuggingFace Hub separately from the 14GB base model. At inference:
-
-```python
-model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, quantization_config=bnb_config)
-model = PeftModel.from_pretrained(model, "your-username/qwen25-coder-7b-text2sql")
+```
+POST /generate  {question: str, schema: str}  →  {sql: str}
 ```
 
-The FastAPI endpoint (`serve.py`) accepts `{question, schema}` and returns `{sql}`. Schema is injected at request time — the model is not tied to any specific database.
+- FastAPI stub: `mlx_output/serve.py`
+- Run: `uvicorn serve:app --host 0.0.0.0 --port 8000`
+- Adapter loads with base model at startup (~5.1GB total)
+- Greedy decoding (temperature=0) for deterministic output
+- Non-SELECT output blocked before returning
 
-**Estimated inference latency:** 1–3 seconds per query on T4 GPU (4-bit quantized).  
-**Hosting cost:** ~$0.53/hr on AWS g4dn.xlarge; $0 during idle on serverless (Modal/RunPod).
+**Hosting options:**
+
+| Option | Latency | Cost |
+|---|---|---|
+| Local Mac (MLX) | ~0.5–1s | $0 |
+| HuggingFace Spaces | ~2–5s | $0 |
+| Modal serverless | ~1s | Per-request |
 
 ---
 
-## Bonus: Safety guardrails
+## Safety Guardrails (Bonus)
 
-Three guardrail layers:
-1. **Training data:** safety refusal examples added for out-of-domain questions, destructive SQL, and PII requests
-2. **Post-generation validation:** reject any output that is not a SELECT statement or contains blocked keywords
-3. **Schema grounding:** verify all referenced tables exist in the provided schema before returning the query
+Three layers:
+1. **Post-generation validation** — reject non-SELECT, block destructive keywords (DELETE/DROP/etc.)
+2. **PII guard** — block queries referencing password/ssn/credit_card fields not present in the schema
+3. **Schema grounding** — schema is injected at request time; model never has cross-database access
+
+All 3 guardrail tests pass (see notebook Bonus cell).
